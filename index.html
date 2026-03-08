@@ -345,6 +345,64 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius:3px; }
     ::-webkit-scrollbar-thumb:hover { background: #666; }
+
+    /* ── Whitespace overlay ───────────────────── */
+    #ws-overlay {
+      position: absolute;
+      pointer-events: none;
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      word-break: break-word;
+      color: var(--text);
+      scrollbar-width: none;
+      /* font synced via JS to match #editor exactly */
+    }
+    #ws-overlay::-webkit-scrollbar { display: none; }
+
+    /* hm: fills the same space as #editor.hm */
+    #ws-overlay.hm {
+      writing-mode: horizontal-tb;
+      top: 0; left: 0; right: 0; bottom: 0;
+      overflow: auto;
+      padding: 18px 22px;
+    }
+    /* vm: same geometry as #editor.vm */
+    #ws-overlay.vm {
+      writing-mode: vertical-rl;
+      text-orientation: mixed;
+      overflow: visible;
+      top: 16px; bottom: 16px;
+      right: 16px; left: auto;
+      height: calc(100% - 32px);
+      width: max-content;
+      min-width: calc(100% - 32px);
+      padding: 0 8px;
+    }
+
+    /* ── Whitespace marker colours ────────────── */
+    /* 全角スペース: underlined blue */
+    .ws-zen { color: #4db6ff;
+              text-decoration: underline;
+              text-decoration-color: rgba(77,182,255,0.55);
+              text-underline-offset: 2px; }
+    /* 半角スペース: middle dot, muted */
+    .ws-sp  { color: #607898; }
+    /* 改行マーク ↵ */
+    .ws-nl  { color: #4db6ff; }
+    /* タブ → */
+    .ws-tab { color: #80b8ff; }
+
+    /* Light theme */
+    body.light .ws-zen, body.light .ws-nl { color: #1a6bcc; }
+    body.light .ws-zen { text-decoration-color: rgba(26,107,204,0.5); }
+    body.light .ws-sp  { color: #9aabb8; }
+    body.light .ws-tab { color: #4a90cc; }
+
+    /* Sepia theme */
+    body.sepia .ws-zen, body.sepia .ws-nl { color: #8a5a30; }
+    body.sepia .ws-zen { text-decoration-color: rgba(138,90,48,0.5); }
+    body.sepia .ws-sp  { color: #a09080; }
+    body.sepia .ws-tab { color: #7a6a50; }
   </style>
 </head>
 <body>
@@ -359,6 +417,7 @@
   <button class="tbtn" id="btn-saveas" title="名前を付けて保存 (Ctrl+Shift+S)">📥 名前を付けて保存</button>
   <div class="sep"></div>
   <button class="tbtn" id="btn-vmode" title="縦書き / 横書きを切り替え">⇅ 縦書き</button>
+  <button class="tbtn" id="btn-ws" title="全角スペース・改行コードを可視化 (Ctrl+G)">¶ 記号表示</button>
   <div class="sep"></div>
   <button class="tbtn" id="btn-settings" title="設定 (Ctrl+,)">⚙ 設定</button>
 </div>
@@ -391,6 +450,9 @@
   <div id="ed-area">
     <div id="tabs-bar"></div>
     <div id="ed-wrap" class="hm">
+
+      <!-- Whitespace overlay (toggled by ¶ 記号表示 button) -->
+      <div id="ws-overlay" class="hm" style="display:none"></div>
 
       <!-- Welcome screen -->
       <div id="welcome">
@@ -511,6 +573,10 @@ const S = {
 };
 
 // FileRec: { name, handle (FSAH|null), content, saved, eol, isNew }
+
+// Whitespace / IME state
+let wsVisible = false;
+let composing  = false;
 
 // ================================================================
 //  File-tree
@@ -768,11 +834,13 @@ function switchTab(idx) {
     $('si-eol').textContent  = f.eol.toUpperCase();
     updateStatus();
     renderTabs();
+    updateOverlay();   // refresh overlay for the newly shown file
     editor.focus();
   } else {
     editor.style.display = 'none';
     welcome.style.display = '';
     $('si-file').textContent = '—';
+    if (wsVisible) $('ws-overlay').innerHTML = '';
   }
 }
 
@@ -788,6 +856,9 @@ function setVMode(on) {
   $('btn-vmode').textContent = on ? '↔ 横書き' : '⇅ 縦書き';
   $('btn-vmode').classList.toggle('on', on);
   $('si-mode').textContent = on ? '縦書き' : '横書き';
+  // Keep overlay in sync with new writing mode
+  syncOverlayClass();
+  updateOverlay();
 }
 
 // ================================================================
@@ -827,6 +898,7 @@ function applyTheme() {
   editor.style.lineHeight = c.lineHeight;
   editor.style.fontFamily = FONTS[c.font];
   document.body.className = c.theme === 'dark' ? '' : c.theme;
+  syncOverlayFont();   // keep overlay font in sync
 }
 
 function saveCfg() {
@@ -839,6 +911,122 @@ function loadCfg() {
     if (s) Object.assign(S.cfg, JSON.parse(s));
   } catch {}
   applyTheme();
+}
+
+// ================================================================
+//  Whitespace overlay
+// ================================================================
+function toggleWs() {
+  wsVisible = !wsVisible;
+  const ov = $('ws-overlay');
+  if (wsVisible) {
+    ov.style.display = '';
+    syncOverlayClass();
+    syncOverlayFont();
+    updateOverlay();
+    // Hide textarea text so only the overlay text shows.
+    // Keep caret-color so cursor stays visible.
+    // During IME composition the color is temporarily restored.
+    if (!composing) editor.style.color = 'transparent';
+  } else {
+    ov.style.display = 'none';
+    editor.style.color = '';   // restore to CSS inherited value
+  }
+  $('btn-ws').classList.toggle('on', wsVisible);
+}
+
+function updateOverlay() {
+  if (!wsVisible) return;
+  const ov   = $('ws-overlay');
+  const text = editor.value;
+  let html   = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    switch (ch) {
+      case '\u3000': // 全角スペース → underlined blue space
+        html += '<span class="ws-zen">\u3000</span>'; break;
+      case ' ':      // 半角スペース → middle dot
+        html += '<span class="ws-sp">\u00B7</span>'; break;
+      case '\t':     // タブ → right arrow + tab
+        html += '<span class="ws-tab">\u2192</span>\t'; break;
+      case '\n':     // 改行 → return symbol then actual newline
+        html += '<span class="ws-nl">\u21B5</span>\n'; break;
+      case '&': html += '&amp;'; break;
+      case '<': html += '&lt;';  break;
+      case '>': html += '&gt;';  break;
+      default:  html += ch;
+    }
+  }
+  ov.innerHTML = html;
+  syncOverlayScroll();
+}
+
+// Sync overlay scroll position to the textarea (hm mode only;
+// in vm mode both are absolutely positioned inside ed-wrap which
+// handles the horizontal scroll, so they move together naturally).
+function syncOverlayScroll() {
+  if (!wsVisible || S.vm) return;
+  const ov = $('ws-overlay');
+  ov.scrollTop  = editor.scrollTop;
+  ov.scrollLeft = editor.scrollLeft;
+}
+
+// Apply the same hm/vm class to the overlay as the editor.
+function syncOverlayClass() {
+  const ov = $('ws-overlay');
+  ov.classList.toggle('hm', !S.vm);
+  ov.classList.toggle('vm',  S.vm);
+}
+
+// Copy font metrics from the editor so text positions match exactly.
+function syncOverlayFont() {
+  if (!wsVisible) return;
+  const ov = $('ws-overlay');
+  ov.style.fontSize   = editor.style.fontSize   || '16px';
+  ov.style.lineHeight = editor.style.lineHeight || '1.8';
+  ov.style.fontFamily = editor.style.fontFamily || 'inherit';
+}
+
+// ================================================================
+//  Cursor movement (Ctrl+H/J/K/L  ←↓↑→)
+// ================================================================
+function moveCursor(dir) {
+  const pos  = editor.selectionStart;
+  const text = editor.value;
+  let newPos = pos;
+
+  if (dir === 'left') {
+    newPos = Math.max(0, pos - 1);
+  } else if (dir === 'right') {
+    newPos = Math.min(text.length, pos + 1);
+  } else {
+    // Up / Down: determine current line index and column
+    const lines = text.split('\n');
+    let lineIdx = 0, lineStart = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const lineEnd = lineStart + lines[i].length;
+      if (pos >= lineStart && pos <= lineEnd) { lineIdx = i; break; }
+      lineStart += lines[i].length + 1; // +1 for the \n
+    }
+    const col = pos - lineStart;
+
+    if (dir === 'up' && lineIdx > 0) {
+      // Find start of previous line
+      let prevStart = 0;
+      for (let i = 0; i < lineIdx - 1; i++) prevStart += lines[i].length + 1;
+      newPos = prevStart + Math.min(col, lines[lineIdx - 1].length);
+    } else if (dir === 'down' && lineIdx < lines.length - 1) {
+      // Find start of next line
+      let nextStart = 0;
+      for (let i = 0; i <= lineIdx; i++) nextStart += lines[i].length + 1;
+      newPos = nextStart + Math.min(col, lines[lineIdx + 1].length);
+    }
+    // else: already at first/last line — no movement
+  }
+
+  editor.selectionStart = editor.selectionEnd = newPos;
+  editor.focus();
+  updateStatus();
 }
 
 // ================================================================
@@ -908,7 +1096,26 @@ editor.addEventListener('input', () => {
     renderTabs();
     updateStatus();
   }
+  updateOverlay();   // keep overlay in sync
 });
+
+// Sync overlay scroll when the textarea scrolls (hm mode)
+editor.addEventListener('scroll', syncOverlayScroll);
+
+// IME composition: temporarily show textarea text during input
+// so the candidate window and underline are visible.
+editor.addEventListener('compositionstart', () => {
+  composing = true;
+  if (wsVisible) editor.style.color = ''; // restore while composing
+});
+editor.addEventListener('compositionend', () => {
+  composing = false;
+  if (wsVisible) {
+    editor.style.color = 'transparent'; // hide again
+    updateOverlay();
+  }
+});
+
 editor.addEventListener('keyup',  updateStatus);
 editor.addEventListener('click',  updateStatus);
 editor.addEventListener('focus',  updateStatus);
@@ -922,6 +1129,7 @@ editor.addEventListener('keydown', e => {
   editor.value = editor.value.slice(0, s) + '\t' + editor.value.slice(en);
   editor.selectionStart = editor.selectionEnd = s + 1;
   if (S.active >= 0) S.files[S.active].content = editor.value;
+  updateOverlay();
 });
 
 // ================================================================
@@ -931,6 +1139,7 @@ document.addEventListener('keydown', e => {
   const mod = e.ctrlKey || e.metaKey;
   if (!mod) return;
   switch (e.key) {
+    // ── File operations ───────────────────────────────────────
     case 's': e.preventDefault();
       if (e.shiftKey) saveFile(S.active, true);
       else            saveFile();
@@ -938,6 +1147,14 @@ document.addEventListener('keydown', e => {
     case 'n': e.preventDefault(); newFile();  break;
     case 'w': e.preventDefault(); if (S.active >= 0) closeTab(S.active); break;
     case ',': e.preventDefault(); openCfg(); break;
+    case 'g': e.preventDefault(); toggleWs(); break;   // ¶ toggle
+
+    // ── Cursor movement (vim-like h/j/k/l) ───────────────────
+    // Only active when the editor is focused to avoid conflicts
+    case 'h': if (document.activeElement === editor) { e.preventDefault(); moveCursor('left');  } break;
+    case 'j': if (document.activeElement === editor) { e.preventDefault(); moveCursor('down');  } break;
+    case 'k': if (document.activeElement === editor) { e.preventDefault(); moveCursor('up');    } break;
+    case 'l': if (document.activeElement === editor) { e.preventDefault(); moveCursor('right'); } break;
   }
 });
 
@@ -950,6 +1167,7 @@ $('btn-new').addEventListener('click',     newFile);
 $('btn-save').addEventListener('click',    () => saveFile());
 $('btn-saveas').addEventListener('click',  () => saveFile(S.active, true));
 $('btn-vmode').addEventListener('click',   () => setVMode(!S.vm));
+$('btn-ws').addEventListener('click',      toggleWs);
 $('btn-settings').addEventListener('click', openCfg);
 $('btn-refresh').addEventListener('click', buildTree);
 
