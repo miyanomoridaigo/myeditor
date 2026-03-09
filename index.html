@@ -215,11 +215,10 @@
       /* direction:ltr prevents inheriting rtl from #ed-wrap.vm */
       direction: ltr;
       overflow: visible;
-      /* IMPORTANT: pre (not pre-wrap) so the overlay never auto-wraps at the
-         container height boundary — textarea uses overflow:visible and doesn't
-         wrap, so the overlay must match exactly. */
-      white-space: pre;
-      overflow-wrap: normal;
+      /* Use pre-wrap (same as textarea default) so the overlay wraps at the
+         container height boundary exactly like the textarea does. */
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
       word-break: normal;
       top: 16px; bottom: 16px; right: 16px; left: auto;
       height: calc(100% - 32px);
@@ -898,6 +897,13 @@ function switchTab(idx) {
     renderTabs();
     updateOverlay();
     updateCursorLine();
+    // In vertical mode, reset scroll to the beginning (rightmost = scrollLeft 0
+    // with direction:rtl) every time a file is switched.  Without this the
+    // viewport stays at the previous file's scroll position.
+    if (S.vm) {
+      edWrap.scrollLeft = 0;
+      requestAnimationFrame(() => { edWrap.scrollLeft = 0; });
+    }
     editor.focus();
   } else {
     editor.style.display = 'none';
