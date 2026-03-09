@@ -202,6 +202,9 @@
       writing-mode: vertical-rl;
       text-orientation: mixed;
       overflow: visible;
+      /* IMPORTANT: must NOT wrap mid-line or positions diverge from textarea */
+      overflow-wrap: normal;
+      word-break: normal;
       top: 16px; bottom: 16px; right: 16px; left: auto;
       height: calc(100% - 32px);
       width: max-content; min-width: calc(100% - 32px);
@@ -228,6 +231,18 @@
     body.sepia .ws-zen { text-decoration-color: rgba(138,90,48,0.5); }
     body.sepia .ws-sp  { color: #a09080; }
     body.sepia .ws-tab { color: #7a6a50; }
+
+    /* Vertical-mode newline indicator: zero-height rule at column break */
+    /* Uses inline-block with height:0 so it adds NO extra chars to column height */
+    .ws-nl-vm {
+      display: inline-block;
+      height: 0;
+      width: 0.65em;
+      border-bottom: 1.5px solid rgba(77,182,255,0.85);
+      overflow: visible;
+    }
+    body.light .ws-nl-vm { border-bottom-color: rgba(26,107,204,0.8); }
+    body.sepia .ws-nl-vm { border-bottom-color: rgba(138,90,48,0.8); }
 
     /* ── Cursor-line highlight ─────────────────── */
     #cl-hl {
@@ -515,12 +530,93 @@ const S = {
     bgColor:    '',   // '' = use theme default
     fgColor:    '',   // '' = use theme default
     cursorLine: false,
+    vm:         true,   // default: vertical writing mode
+    ws:         false,  // default: whitespace markers off
   }
 };
 
 // FileRec: { name, handle (FSAH|null), content, saved, eol, isNew }
 
 let wsVisible = false;   // whitespace overlay on?
+
+// ================================================================
+//  IndexedDB – persist FileSystemDirectoryHandle across sessions
+// ================================================================
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('tgk_store', 1);
+    req.onupgradeneeded = e => e.target.result.createObjectStore('kv');
+    req.onsuccess       = e => resolve(e.target.result);
+    req.onerror         = e => reject(e.target.error);
+  });
+}
+async function idbSet(key, val) {
+  try {
+    const db = await idbOpen();
+    await new Promise((res, rej) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(val, key);
+      tx.oncomplete = res;
+      tx.onerror    = e => rej(e.target.error);
+    });
+  } catch {}
+}
+async function idbGet(key) {
+  try {
+    const db = await idbOpen();
+    return await new Promise(res => {
+      const req = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+      req.onsuccess = () => res(req.result ?? null);
+      req.onerror   = () => res(null);
+    });
+  } catch { return null; }
+}
+
+// Try to restore the last opened folder on startup
+async function tryRestoreLastFolder() {
+  const handle = await idbGet('rootHandle');
+  if (!handle) return;
+  try {
+    // queryPermission does NOT require a user gesture
+    const perm = await handle.queryPermission({ mode: 'readwrite' });
+    if (perm === 'granted') {
+      S.root = handle;
+      $('sidebar-title').textContent = handle.name;
+      await buildTree();
+    } else {
+      // Permission needs re-grant — show a "reopen" button
+      showReopenBtn(handle);
+    }
+  } catch { /* handle is stale, ignore */ }
+}
+
+function showReopenBtn(handle) {
+  const ph = $('tree-ph');
+  if (!ph) return;
+  ph.innerHTML =
+    `<div class="tree-msg">
+       前回開いたフォルダ:<br>
+       <strong style="font-size:12px">${handle.name}</strong>
+       <div style="margin-top:10px">
+         <button class="tbtn" id="btn-reopen" style="font-size:12px;">
+           📂 再度開く
+         </button>
+       </div>
+     </div>`;
+  $('btn-reopen').addEventListener('click', async () => {
+    try {
+      const perm = await handle.requestPermission({ mode: 'readwrite' });
+      if (perm === 'granted') {
+        S.root = handle;
+        $('sidebar-title').textContent = handle.name;
+        await buildTree();
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError')
+        alert('フォルダを開けませんでした:\n' + e.message);
+    }
+  });
+}
 
 // ================================================================
 //  File-tree
@@ -535,6 +631,7 @@ async function openDir() {
     const h = await window.showDirectoryPicker({ mode: 'readwrite' });
     S.root = h;
     $('sidebar-title').textContent = h.name;
+    await idbSet('rootHandle', h);   // persist for next session
     await buildTree();
   } catch (e) {
     if (e.name !== 'AbortError')
@@ -794,6 +891,7 @@ function setVMode(on) {
   hl.classList.toggle('hm', !on);
   hl.classList.toggle('vm',  on);
   updateCursorLine();
+  saveCfg();
 }
 
 // ================================================================
@@ -879,15 +977,37 @@ function applyTheme() {
 }
 
 function saveCfg() {
+  // Snapshot runtime toggles into cfg before saving
+  S.cfg.vm = S.vm;
+  S.cfg.ws = wsVisible;
   try { localStorage.setItem('tgk_cfg', JSON.stringify(S.cfg)); } catch {}
 }
 
-function loadCfg() {
+async function loadCfg() {
   try {
     const s = localStorage.getItem('tgk_cfg');
     if (s) Object.assign(S.cfg, JSON.parse(s));
   } catch {}
+
+  // Capture saved flags BEFORE setVMode/toggleWs call saveCfg and overwrite them
+  const savedVm = (S.cfg.vm !== false);   // default true
+  const savedWs = !!S.cfg.ws;
+
   applyTheme();
+
+  // Restore writing mode (default: vertical)
+  // Initialize without triggering saveCfg by setting S.vm directly, then calling setVMode
+  S.vm = !savedVm;   // force setVMode to actually apply changes
+  setVMode(savedVm);
+
+  // Restore whitespace visibility
+  if (savedWs) {
+    wsVisible = false;   // ensure toggleWs goes → true
+    toggleWs();
+  }
+
+  // Restore last opened folder (async, no user gesture needed if permission persists)
+  await tryRestoreLastFolder();
 }
 
 // ================================================================
@@ -906,6 +1026,7 @@ function toggleWs() {
     ov.innerHTML = '';
   }
   $('btn-ws').classList.toggle('on', wsVisible);
+  saveCfg();
 }
 
 function updateOverlay() {
@@ -931,9 +1052,15 @@ function updateOverlay() {
       case '\t':      // タブ → →
         flushReg();
         html += '<span class="ws-tab">\u2192</span>\t'; break;
-      case '\n':      // 改行 → ↵ + newline
+      case '\n':      // 改行
         flushReg();
-        html += '<span class="ws-nl">\u21B5</span>\n'; break;
+        // In vertical mode, adding a character symbol before \n would shift all
+        // subsequent characters in the column down by 1 unit, causing misalignment.
+        // Use a zero-height border indicator instead (adds no column height).
+        html += S.vm
+          ? '<span class="ws-nl-vm"></span>\n'
+          : '<span class="ws-nl">\u21B5</span>\n';
+        break;
       case '&': reg += '&amp;'; break;
       case '<': reg += '&lt;';  break;
       case '>': reg += '&gt;';  break;
@@ -1122,6 +1249,20 @@ document.addEventListener('mouseup', () => {
   document.body.style.cursor     = '';
   document.body.style.userSelect = '';
 });
+
+// ================================================================
+//  Mouse-wheel scroll fix for vertical mode
+//  In writing-mode: vertical-rl, columns go right→left, so the
+//  natural vertical wheel should scroll the container horizontally.
+// ================================================================
+edWrap.addEventListener('wheel', e => {
+  if (!S.vm) return;
+  e.preventDefault();
+  // Combine vertical and horizontal deltas; vertical scroll is primary
+  const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+  // scrollLeft -= delta:  wheel-down (positive delta) → scroll left → show next columns
+  edWrap.scrollLeft -= delta;
+}, { passive: false });
 
 // ================================================================
 //  Editor events
