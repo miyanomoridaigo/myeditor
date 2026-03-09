@@ -762,7 +762,27 @@ async function openFileHandle(fh, name) {
   try {
     const file = await fh.getFile();
     if (file.size > 10 * 1024 * 1024) { alert('10 MB を超えるファイルは開けません'); return; }
-    const raw = await file.text();
+    let raw;
+    try {
+      raw = await file.text();
+    } catch (readErr) {
+      // Dropbox online-only files fail to read with NotReadableError or similar.
+      // file.size may be 0 or non-zero but the actual content isn't on disk.
+      const isDropboxOnline =
+        readErr.name === 'NotReadableError' ||
+        (readErr.message && /not readable|cloud|online|placeholder|sparse/i.test(readErr.message));
+      if (isDropboxOnline || file.size === 0) {
+        alert(
+          `"${name}" はクラウド上にのみ存在するため読み込めませんでした。\n\n` +
+          `Dropbox でこのファイルを右クリックし、\n` +
+          `「オフラインで使用可能にする」を選択してから\n` +
+          `再度開いてください。`
+        );
+      } else {
+        alert('ファイルを開けませんでした:\n' + readErr.message);
+      }
+      return;
+    }
     if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(raw.slice(0, 2000))) {
       alert(`"${name}" はバイナリファイルのため開けません`); return;
     }
