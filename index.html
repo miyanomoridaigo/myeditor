@@ -173,14 +173,15 @@
       writing-mode: vertical-rl;
       text-orientation: mixed;
       direction: ltr;
-      /* Fill the available space exactly — the textarea becomes the viewport.
-         overflow:hidden hides the scrollbar while still allowing programmatic
-         scrollLeft changes (cursor tracking, wheel handler). */
+      /* The textarea is the sole scroll container in vm mode.
+         overflow-x:auto shows one scrollbar (the textarea's own).
+         ed-wrap has overflow:hidden so its scrollbar never appears,
+         giving exactly one scrollbar total. */
       top: 16px; bottom: 16px; left: 16px; right: 16px;
-      overflow: hidden; padding: 0 8px;
+      overflow-x: auto; overflow-y: hidden; padding: 0 8px;
     }
     #ed-wrap.hm { overflow: hidden; }
-    /* vm: ed-wrap itself never scrolls — the textarea scrolls internally */
+    /* vm: ed-wrap never scrolls — all scrolling is via the textarea */
     #ed-wrap.vm { overflow: hidden; }
 
     /* ── Whitespace overlay ───────────────────── */
