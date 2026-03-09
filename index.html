@@ -1307,15 +1307,14 @@ document.addEventListener('mouseup', () => {
 //    • scrollLeft = 0         → rightmost content visible (BEGINNING)
 //    • scrollLeft = negative  → scrolled left (LATER columns)
 //
-//  So wheel-down (positive deltaY) should DECREASE scrollLeft.
-//  We attach with { passive:false } on BOTH the textarea and edWrap
-//  to ensure preventDefault works even if the browser has added
-//  its own passive listener somewhere in the chain.
+//  Attach only to edWrap (not to the textarea too) to avoid
+//  double-firing: wheel events on the textarea bubble up to edWrap
+//  naturally, and we handle them there with preventDefault to
+//  suppress the browser's own scroll.
 // ================================================================
 function onVmWheel(e) {
   if (!S.vm) return;
   e.preventDefault();
-  e.stopPropagation();
 
   // Normalise deltaY to pixels (deltaMode 0=px, 1=line, 2=page)
   let delta = e.deltaY;
@@ -1327,8 +1326,7 @@ function onVmWheel(e) {
   // wheel-down (positive delta) → move toward end → scrollLeft decreases
   edWrap.scrollLeft -= delta;
 }
-editor.addEventListener ('wheel', onVmWheel, { passive: false });
-edWrap.addEventListener  ('wheel', onVmWheel, { passive: false });
+edWrap.addEventListener('wheel', onVmWheel, { passive: false });
 
 // ================================================================
 //  Editor events
