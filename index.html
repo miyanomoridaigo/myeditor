@@ -144,8 +144,6 @@
       display: flex; flex-direction: column;
       align-items: center; justify-content: center;
       gap: 14px; color: var(--dim); text-align: center; padding: 20px;
-      /* Override any direction:rtl inherited from #ed-wrap.vm */
-      direction: ltr;
     }
     #welcome h2 { font-size: 20px; color: var(--text); }
     #welcome p  { font-size: 13px; line-height: 1.7; }
@@ -174,22 +172,16 @@
     #editor.vm {
       writing-mode: vertical-rl;
       text-orientation: mixed;
-      /* direction:ltr prevents inheriting rtl from #ed-wrap.vm */
       direction: ltr;
-      top: 16px; bottom: 16px; right: 16px; left: auto;
-      height: calc(100% - 32px);
-      width: max-content; min-width: calc(100% - 32px);
-      overflow: visible; padding: 0 8px;
+      /* Fill the available space exactly — the textarea becomes the viewport.
+         overflow:hidden hides the scrollbar while still allowing programmatic
+         scrollLeft changes (cursor tracking, wheel handler). */
+      top: 16px; bottom: 16px; left: 16px; right: 16px;
+      overflow: hidden; padding: 0 8px;
     }
     #ed-wrap.hm { overflow: hidden; }
-    #ed-wrap.vm {
-      overflow-x: auto; overflow-y: hidden;
-      /* direction:rtl shifts the scroll origin to the RIGHT, which is where
-         vertical-rl content starts.  This lets overflow-x track the textarea
-         as it expands leftward (more columns) and makes scrollLeft=0 show the
-         beginning of the document automatically. */
-      direction: rtl;
-    }
+    /* vm: ed-wrap itself never scrolls — the textarea scrolls internally */
+    #ed-wrap.vm { overflow: hidden; }
 
     /* ── Whitespace overlay ───────────────────── */
     #ws-overlay {
@@ -212,17 +204,15 @@
     #ws-overlay.vm {
       writing-mode: vertical-rl;
       text-orientation: mixed;
-      /* direction:ltr prevents inheriting rtl from #ed-wrap.vm */
       direction: ltr;
-      overflow: visible;
-      /* Use pre-wrap (same as textarea default) so the overlay wraps at the
-         container height boundary exactly like the textarea does. */
+      overflow: hidden;
+      /* pre-wrap matches textarea default so column breaks happen at the same
+         height boundary in both elements */
       white-space: pre-wrap;
       overflow-wrap: break-word;
       word-break: normal;
-      top: 16px; bottom: 16px; right: 16px; left: auto;
-      height: calc(100% - 32px);
-      width: max-content; min-width: calc(100% - 32px);
+      /* Same inset as #editor.vm so the overlay is an exact visual match */
+      top: 16px; bottom: 16px; left: 16px; right: 16px;
       padding: 0 8px;
     }
 
@@ -897,12 +887,15 @@ function switchTab(idx) {
     renderTabs();
     updateOverlay();
     updateCursorLine();
-    // In vertical mode, reset scroll to the beginning (rightmost = scrollLeft 0
-    // with direction:rtl) every time a file is switched.  Without this the
-    // viewport stays at the previous file's scroll position.
+    // In vertical mode, scroll to the beginning (rightmost content).
+    // scrollLeft = scrollWidth - clientWidth shows the rightmost columns.
+    // Use rAF so the layout has been computed with the new content.
     if (S.vm) {
-      edWrap.scrollLeft = 0;
-      requestAnimationFrame(() => { edWrap.scrollLeft = 0; });
+      editor.scrollTop = 0;
+      requestAnimationFrame(() => {
+        editor.scrollLeft = editor.scrollWidth - editor.clientWidth;
+        syncOverlayScroll();
+      });
     }
     editor.focus();
   } else {
@@ -935,11 +928,18 @@ function setVMode(on) {
   updateCursorLine();
 
   if (on) {
-    // In vm mode with direction:rtl, scrollLeft=0 already shows the
-    // rightmost content (beginning).  Ensure we start there.
-    requestAnimationFrame(() => { edWrap.scrollLeft = 0; });
+    // Scroll to the BEGINNING of the document (= rightmost content in
+    // vertical-rl).  scrollLeft=max shows the rightmost (first) columns.
+    // We use rAF so the browser has had a chance to lay out the content
+    // and compute the correct scrollWidth.
+    editor.scrollTop = 0;
+    requestAnimationFrame(() => {
+      editor.scrollLeft = editor.scrollWidth - editor.clientWidth;
+      syncOverlayScroll();
+    });
   } else {
-    edWrap.scrollLeft = 0;
+    editor.scrollLeft = 0;
+    editor.scrollTop  = 0;
   }
   saveCfg();
 }
@@ -1122,9 +1122,11 @@ function updateOverlay() {
   syncOverlayScroll();
 }
 
-// Sync overlay scroll (hm mode only; vm mode scrolls together via ed-wrap)
+// Sync overlay scroll position with the textarea (both hm and vm modes).
+// In vm mode the overlay is a fixed-size overflow:hidden box — its scrollLeft
+// must be kept in sync with the textarea's scrollLeft manually.
 function syncOverlayScroll() {
-  if (!wsVisible || S.vm) return;
+  if (!wsVisible) return;
   const ov = $('ws-overlay');
   ov.scrollTop  = editor.scrollTop;
   ov.scrollLeft = editor.scrollLeft;
@@ -1301,16 +1303,19 @@ document.addEventListener('mouseup', () => {
 });
 
 // ================================================================
-//  Mouse-wheel scroll fix for vertical mode
+//  Mouse-wheel scroll for vertical mode
 //
-//  #ed-wrap.vm has direction:rtl, which means:
-//    • scrollLeft = 0         → rightmost content visible (BEGINNING)
-//    • scrollLeft = negative  → scrolled left (LATER columns)
+//  Architecture: #ed-wrap.vm has overflow:hidden (no scrollbar).
+//  The textarea (#editor) is the only scroll container.
+//  Its scrollLeft controls which columns are visible.
 //
-//  Attach only to edWrap (not to the textarea too) to avoid
-//  double-firing: wheel events on the textarea bubble up to edWrap
-//  naturally, and we handle them there with preventDefault to
-//  suppress the browser's own scroll.
+//  In writing-mode:vertical-rl with direction:ltr:
+//    • scrollLeft = 0    → leftmost content = END of document
+//    • scrollLeft = max  → rightmost content = BEGINNING of document
+//  (vertical-rl lays out the first column on the RIGHT)
+//
+//  So: wheel-down (positive deltaY) → go forward → show later columns
+//      → move left → DECREASE scrollLeft
 // ================================================================
 function onVmWheel(e) {
   if (!S.vm) return;
@@ -1318,13 +1323,12 @@ function onVmWheel(e) {
 
   // Normalise deltaY to pixels (deltaMode 0=px, 1=line, 2=page)
   let delta = e.deltaY;
-  if (e.deltaMode === 1) delta *= 24;    // line mode
-  if (e.deltaMode === 2) delta *= 400;   // page mode
+  if (e.deltaMode === 1) delta *= 24;
+  if (e.deltaMode === 2) delta *= 400;
 
-  // direction:rtl on edWrap → scrollLeft starts at 0 (right/start) and
-  // goes negative when scrolled toward left/end.
-  // wheel-down (positive delta) → move toward end → scrollLeft decreases
-  edWrap.scrollLeft -= delta;
+  // Decrease scrollLeft to go forward (toward the left = toward end)
+  editor.scrollLeft -= delta;
+  syncOverlayScroll();
 }
 edWrap.addEventListener('wheel', onVmWheel, { passive: false });
 
