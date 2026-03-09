@@ -144,6 +144,8 @@
       display: flex; flex-direction: column;
       align-items: center; justify-content: center;
       gap: 14px; color: var(--dim); text-align: center; padding: 20px;
+      /* Override any direction:rtl inherited from #ed-wrap.vm */
+      direction: ltr;
     }
     #welcome h2 { font-size: 20px; color: var(--text); }
     #welcome p  { font-size: 13px; line-height: 1.7; }
@@ -172,13 +174,22 @@
     #editor.vm {
       writing-mode: vertical-rl;
       text-orientation: mixed;
+      /* direction:ltr prevents inheriting rtl from #ed-wrap.vm */
+      direction: ltr;
       top: 16px; bottom: 16px; right: 16px; left: auto;
       height: calc(100% - 32px);
       width: max-content; min-width: calc(100% - 32px);
       overflow: visible; padding: 0 8px;
     }
     #ed-wrap.hm { overflow: hidden; }
-    #ed-wrap.vm { overflow-x: auto; overflow-y: hidden; }
+    #ed-wrap.vm {
+      overflow-x: auto; overflow-y: hidden;
+      /* direction:rtl shifts the scroll origin to the RIGHT, which is where
+         vertical-rl content starts.  This lets overflow-x track the textarea
+         as it expands leftward (more columns) and makes scrollLeft=0 show the
+         beginning of the document automatically. */
+      direction: rtl;
+    }
 
     /* ── Whitespace overlay ───────────────────── */
     #ws-overlay {
@@ -201,8 +212,13 @@
     #ws-overlay.vm {
       writing-mode: vertical-rl;
       text-orientation: mixed;
+      /* direction:ltr prevents inheriting rtl from #ed-wrap.vm */
+      direction: ltr;
       overflow: visible;
-      /* IMPORTANT: must NOT wrap mid-line or positions diverge from textarea */
+      /* IMPORTANT: pre (not pre-wrap) so the overlay never auto-wraps at the
+         container height boundary — textarea uses overflow:visible and doesn't
+         wrap, so the overlay must match exactly. */
+      white-space: pre;
       overflow-wrap: normal;
       word-break: normal;
       top: 16px; bottom: 16px; right: 16px; left: auto;
@@ -891,6 +907,14 @@ function setVMode(on) {
   hl.classList.toggle('hm', !on);
   hl.classList.toggle('vm',  on);
   updateCursorLine();
+
+  if (on) {
+    // In vm mode with direction:rtl, scrollLeft=0 already shows the
+    // rightmost content (beginning).  Ensure we start there.
+    requestAnimationFrame(() => { edWrap.scrollLeft = 0; });
+  } else {
+    edWrap.scrollLeft = 0;
+  }
   saveCfg();
 }
 
@@ -1252,17 +1276,33 @@ document.addEventListener('mouseup', () => {
 
 // ================================================================
 //  Mouse-wheel scroll fix for vertical mode
-//  In writing-mode: vertical-rl, columns go right→left, so the
-//  natural vertical wheel should scroll the container horizontally.
+//
+//  #ed-wrap.vm has direction:rtl, which means:
+//    • scrollLeft = 0         → rightmost content visible (BEGINNING)
+//    • scrollLeft = negative  → scrolled left (LATER columns)
+//
+//  So wheel-down (positive deltaY) should DECREASE scrollLeft.
+//  We attach with { passive:false } on BOTH the textarea and edWrap
+//  to ensure preventDefault works even if the browser has added
+//  its own passive listener somewhere in the chain.
 // ================================================================
-edWrap.addEventListener('wheel', e => {
+function onVmWheel(e) {
   if (!S.vm) return;
   e.preventDefault();
-  // Combine vertical and horizontal deltas; vertical scroll is primary
-  const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
-  // scrollLeft -= delta:  wheel-down (positive delta) → scroll left → show next columns
+  e.stopPropagation();
+
+  // Normalise deltaY to pixels (deltaMode 0=px, 1=line, 2=page)
+  let delta = e.deltaY;
+  if (e.deltaMode === 1) delta *= 24;    // line mode
+  if (e.deltaMode === 2) delta *= 400;   // page mode
+
+  // direction:rtl on edWrap → scrollLeft starts at 0 (right/start) and
+  // goes negative when scrolled toward left/end.
+  // wheel-down (positive delta) → move toward end → scrollLeft decreases
   edWrap.scrollLeft -= delta;
-}, { passive: false });
+}
+editor.addEventListener ('wheel', onVmWheel, { passive: false });
+edWrap.addEventListener  ('wheel', onVmWheel, { passive: false });
 
 // ================================================================
 //  Editor events
