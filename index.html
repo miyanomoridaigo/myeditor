@@ -159,7 +159,7 @@
       border: none; outline: none; resize: none;
       background: transparent; color: inherit;
       font-size: 16px; line-height: 1.8;
-      tab-size: 2; caret-color: var(--accent);
+      tab-size: 2; caret-color: hotpink;
       font-family: inherit;
     }
     #editor.hm {
@@ -256,17 +256,17 @@
       pointer-events: none;
       display: none;
     }
-    /* horizontal mode: underline across the current text row */
+    /* horizontal mode: full-line background + bottom border on the current row */
     #cl-hl.hm {
       left: 0; right: 0;
-      height: 0;
-      border-bottom: 2px solid rgba(100, 180, 255, 0.5);
+      background: rgba(255, 105, 180, 0.08);
+      border-bottom: 2px solid rgba(255, 105, 180, 0.55);
     }
-    /* vertical mode: vertical bar at the right of the current column */
+    /* vertical mode: semi-transparent pink column background */
     #cl-hl.vm {
-      top: 0; bottom: 0;
-      width: 0;
-      border-left: 2px solid rgba(100, 180, 255, 0.5);
+      top: 16px; bottom: 16px;
+      background: rgba(255, 105, 180, 0.12);
+      border-right: 2px solid rgba(255, 105, 180, 0.55);
     }
 
     /* ── Status bar ───────────────────────────── */
@@ -1171,27 +1171,33 @@ function updateCursorLine() {
   const lineH = fs * lh;
 
   if (S.vm) {
-    // In vertical mode: each buffer line = one column
-    // First column (lineIdx=0) sits at right:16px; each column is ~lineH px wide
-    const rightPos = 16 + lineIdx * lineH;
-    hl.className = 'vm';
-    hl.style.top    = '16px';
-    hl.style.bottom = '16px';
-    hl.style.right  = rightPos + 'px';
+    // Vertical mode: each buffer line = one column (width ≈ lineH px).
+    // The textarea scrolls horizontally; account for scrollLeft so the
+    // highlight tracks the column even when the view is scrolled.
+    //
+    // Column lineIdx's RIGHT edge from ed-wrap's right:
+    //   edWrap.clientWidth - 16 - scrollWidth + lineIdx*lineH + scrollLeft
+    const colRight = edWrap.clientWidth - 16
+                     - editor.scrollWidth + lineIdx * lineH + editor.scrollLeft;
+    hl.className    = 'vm';
+    hl.style.top    = '';   // let CSS #cl-hl.vm handle top/bottom
+    hl.style.bottom = '';
+    hl.style.right  = colRight + 'px';
+    hl.style.width  = lineH + 'px';
     hl.style.left   = 'auto';
-    hl.style.height = 'auto';
-    hl.style.width  = '0';
+    hl.style.height = '';
   } else {
-    // In horizontal mode: underline at the bottom of the current line
-    const pad = 18;  // padding-top from CSS
-    const top = pad + (lineIdx + 1) * lineH - 2;
-    hl.className = 'hm';
+    // Horizontal mode: full-line background block.
+    // Subtract scrollTop so the highlight moves with the content.
+    const pad = 18;   // padding-top from CSS
+    const top = pad + lineIdx * lineH - editor.scrollTop;
+    hl.className    = 'hm';
     hl.style.top    = top + 'px';
+    hl.style.height = lineH + 'px';
     hl.style.bottom = 'auto';
-    hl.style.left   = '22px';
-    hl.style.right  = '22px';
-    hl.style.height = '0';
-    hl.style.width  = 'auto';
+    hl.style.left   = '0';
+    hl.style.right  = '0';
+    hl.style.width  = '';
   }
   hl.style.display = '';
 }
@@ -1330,6 +1336,7 @@ function onVmWheel(e) {
   // Decrease scrollLeft to go forward (toward the left = toward end)
   editor.scrollLeft -= delta;
   syncOverlayScroll();
+  updateCursorLine();
 }
 edWrap.addEventListener('wheel', onVmWheel, { passive: false });
 
@@ -1346,7 +1353,7 @@ editor.addEventListener('input', () => {
   updateCursorLine();
 });
 
-editor.addEventListener('scroll', syncOverlayScroll);
+editor.addEventListener('scroll', () => { syncOverlayScroll(); updateCursorLine(); });
 
 editor.addEventListener('keyup',  () => { updateStatus(); updateCursorLine(); });
 editor.addEventListener('click',  () => { updateStatus(); updateCursorLine(); });
